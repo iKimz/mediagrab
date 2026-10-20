@@ -1,36 +1,47 @@
 import os
 import sys
 import shutil
+import glob
 import subprocess
 import urllib.request
 import zipfile
 
+def is_valid_binary(p):
+    """Real standalone static ffmpeg / ffprobe binaries are always > 15 MB (not 390KB shims)."""
+    return bool(p and os.path.isfile(p) and os.path.getsize(p) > 15 * 1024 * 1024)
+
 def ensure_windows_ffmpeg(dest_dir="."):
-    """Finds existing FFmpeg/FFprobe or downloads official static Windows build."""
-    from engine import find_ffmpeg_path
-    raw_ffmpeg = find_ffmpeg_path()
-    ffmpeg_bin = None
-    ffprobe_bin = None
-
-    if raw_ffmpeg:
-        real_ff = os.path.realpath(raw_ffmpeg)
-        if os.path.isfile(real_ff):
-            ffmpeg_bin = real_ff
-            probe_candidate = os.path.join(os.path.dirname(real_ff), "ffprobe.exe")
-            if os.path.isfile(probe_candidate):
-                ffprobe_bin = os.path.realpath(probe_candidate)
-
-    # Check local destination folder
+    """Finds existing real FFmpeg/FFprobe binaries (>15MB) or downloads official static build."""
     local_ff = os.path.abspath(os.path.join(dest_dir, "ffmpeg.exe"))
     local_probe = os.path.abspath(os.path.join(dest_dir, "ffprobe.exe"))
-    if os.path.isfile(local_ff) and os.path.isfile(local_probe):
+
+    # 1. Check local directory
+    if is_valid_binary(local_ff) and is_valid_binary(local_probe):
+        print(f"Found local valid FFmpeg: {local_ff} ({os.path.getsize(local_ff):,} bytes)")
+        print(f"Found local valid FFprobe: {local_probe} ({os.path.getsize(local_probe):,} bytes)")
         return local_ff, local_probe
 
-    if ffmpeg_bin and ffprobe_bin:
-        return ffmpeg_bin, ffprobe_bin
+    # 2. Check system PATH / WinGet / Chocolatey lib
+    from engine import find_ffmpeg_path
+    raw_ffmpeg = find_ffmpeg_path()
+    if raw_ffmpeg:
+        real_ff = os.path.realpath(raw_ffmpeg)
+        if is_valid_binary(real_ff):
+            probe_candidate = os.path.join(os.path.dirname(real_ff), "ffprobe.exe")
+            if is_valid_binary(probe_candidate):
+                return real_ff, os.path.realpath(probe_candidate)
 
-    # If missing, download official standalone static build
-    print("FFmpeg/FFprobe not fully detected. Downloading official static build for Windows...")
+    # Check Chocolatey real tools folder (bypass 392KB shims in bin/)
+    choco_candidates = glob.glob(r"C:\ProgramData\chocolatey\lib\ffmpeg\**\ffmpeg.exe", recursive=True)
+    for c in choco_candidates:
+        if is_valid_binary(c):
+            c_probe = os.path.join(os.path.dirname(c), "ffprobe.exe")
+            if is_valid_binary(c_probe):
+                print(f"Found Chocolatey real binary: {c}")
+                return c, c_probe
+
+    # 3. If no real binary > 15MB found, download official static build from yt-dlp/FFmpeg-Builds
+    print("No valid static FFmpeg (>15MB) found. Downloading official static build for Windows...")
     zip_url = "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
     temp_zip = os.path.join(dest_dir, "ffmpeg_download.zip")
 
@@ -50,14 +61,14 @@ def ensure_windows_ffmpeg(dest_dir="."):
         if os.path.isfile(temp_zip):
             os.remove(temp_zip)
 
-        if os.path.isfile(local_ff) and os.path.isfile(local_probe):
+        if is_valid_binary(local_ff) and is_valid_binary(local_probe):
             print(f"Extracted FFmpeg: {local_ff} ({os.path.getsize(local_ff):,} bytes)")
             print(f"Extracted FFprobe: {local_probe} ({os.path.getsize(local_probe):,} bytes)")
             return local_ff, local_probe
     except Exception as e:
         print(f"Failed to auto-download Windows FFmpeg: {e}")
 
-    return ffmpeg_bin, ffprobe_bin
+    return None, None
 
 def build():
     print("=== [1/4] Generating App Icons ===")
@@ -67,10 +78,10 @@ def build():
     print("=== [2/4] Locating Full FFmpeg & FFprobe Binaries ===")
     ffmpeg_bin, ffprobe_bin = ensure_windows_ffmpeg(".")
 
-    if not ffmpeg_bin or not os.path.isfile(ffmpeg_bin):
-        raise RuntimeError("CRITICAL ERROR: ffmpeg.exe is missing! Cannot proceed without FFmpeg.")
-    if not ffprobe_bin or not os.path.isfile(ffprobe_bin):
-        raise RuntimeError("CRITICAL ERROR: ffprobe.exe is missing! Cannot proceed without FFprobe.")
+    if not is_valid_binary(ffmpeg_bin):
+        raise RuntimeError(f"CRITICAL ERROR: ffmpeg.exe is missing or invalid! Path: {ffmpeg_bin}")
+    if not is_valid_binary(ffprobe_bin):
+        raise RuntimeError(f"CRITICAL ERROR: ffprobe.exe is missing or invalid! Path: {ffprobe_bin}")
 
     print(f"Target FFmpeg binary: {ffmpeg_bin} (Size: {os.path.getsize(ffmpeg_bin):,} bytes)")
     print(f"Target FFprobe binary: {ffprobe_bin} (Size: {os.path.getsize(ffprobe_bin):,} bytes)")
@@ -111,7 +122,7 @@ def build():
     print(f" File Size: {size_mb:.2f} MB")
     print("="*60)
 
-    # Verification: Must be > 100 MB because FFmpeg + FFprobe are embedded
+    # Verification: Must be > 80 MB because FFmpeg + FFprobe are embedded
     if size_mb < 80.0:
         raise RuntimeError(f"VALIDATION FAILED: Executable size is only {size_mb:.2f} MB! FFmpeg binaries were not properly embedded!")
 

@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Release Tag (e.g., v1.0.1)'
+        description: 'Release Tag (e.g., v1.0.2)'
         required: true
-        default: 'v1.0.1'
+        default: 'v1.0.2'
 
 permissions:
   contents: write
@@ -28,9 +28,15 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install FFmpeg via Chocolatey
+      - name: Download Official Standalone Static FFmpeg for Windows
+        shell: bash
         run: |
-          choco install ffmpeg -y
+          curl -L -o ffmpeg.zip https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip
+          unzip -q ffmpeg.zip
+          mv ffmpeg-master-latest-win64-gpl/bin/ffmpeg.exe ./ffmpeg.exe
+          mv ffmpeg-master-latest-win64-gpl/bin/ffprobe.exe ./ffprobe.exe
+          rm -rf ffmpeg.zip ffmpeg-master-latest-win64-gpl
+          ls -lh ffmpeg.exe ffprobe.exe
 
       - name: Install Python Dependencies
         run: |
