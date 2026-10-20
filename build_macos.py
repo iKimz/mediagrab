@@ -4,47 +4,60 @@ import shutil
 import subprocess
 import platform
 import urllib.request
-import zipfile
-import tarfile
+import gzip
 
-def download_mac_ffmpeg(dest_dir="."):
-    """Download static ffmpeg binary for macOS if not present."""
-    ffmpeg_bin = os.path.join(dest_dir, "ffmpeg")
-    if os.path.isfile(ffmpeg_bin) and os.access(ffmpeg_bin, os.X_OK):
-        print(f"Local macOS FFmpeg already exists at: {ffmpeg_bin}")
-        return ffmpeg_bin
+def download_mac_binaries(dest_dir="."):
+    """
+    Downloads static standalone FFmpeg and FFprobe binaries for macOS
+    and creates Universal 2 binaries (runs natively on Apple Silicon and Intel).
+    """
+    ffmpeg_final = os.path.join(dest_dir, "ffmpeg")
+    ffprobe_final = os.path.join(dest_dir, "ffprobe")
 
-    # Check system PATH / Homebrew first
-    system_ffmpeg = shutil.which("ffmpeg")
-    if system_ffmpeg:
-        print(f"Found system FFmpeg at: {system_ffmpeg}")
-        return system_ffmpeg
-    for p in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"]:
-        if os.path.isfile(p):
-            print(f"Found Homebrew FFmpeg at: {p}")
-            return p
+    if os.path.isfile(ffmpeg_final) and os.access(ffmpeg_final, os.X_OK):
+        print(f"macOS FFmpeg binary already present at: {ffmpeg_final}")
+        return ffmpeg_final, ffprobe_final if os.path.isfile(ffprobe_final) else None
 
-    # Download prebuilt static ffmpeg binary
-    arch = platform.machine().lower()
-    print(f"Downloading static FFmpeg for macOS ({arch})...")
-    # GitHub release static build for macOS (Universal / ARM64 / x86_64)
-    # Using dependable eugenware or evermeet static build
-    url = "https://evermeet.cx/ffmpeg/getrelease/zip"
-    zip_path = os.path.join(dest_dir, "ffmpeg_mac.zip")
+    tag = "b6.1.1"
+    base_url = f"https://github.com/eugeneware/ffmpeg-static/releases/download/{tag}"
+
+    print("Downloading standalone static FFmpeg & FFprobe for macOS (Universal 2)...")
     try:
-        urllib.request.urlretrieve(url, zip_path)
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(dest_dir)
-        if os.path.isfile(ffmpeg_bin):
-            os.chmod(ffmpeg_bin, 0o755)
-            print(f"FFmpeg downloaded and unpacked to: {ffmpeg_bin}")
-        if os.path.isfile(zip_path):
-            os.remove(zip_path)
-        return ffmpeg_bin
+        # Download arm64 and x64 builds
+        for tool in ["ffmpeg", "ffprobe"]:
+            arm64_file = os.path.join(dest_dir, f"{tool}-arm64")
+            x64_file = os.path.join(dest_dir, f"{tool}-x64")
+            out_file = os.path.join(dest_dir, tool)
+
+            print(f"Fetching {tool} for Apple Silicon (arm64)...")
+            urllib.request.urlretrieve(f"{base_url}/{tool}-darwin-arm64", arm64_file)
+            os.chmod(arm64_file, 0o755)
+
+            print(f"Fetching {tool} for Intel (x64)...")
+            urllib.request.urlretrieve(f"{base_url}/{tool}-darwin-x64", x64_file)
+            os.chmod(x64_file, 0o755)
+
+            # Combine into Universal binary using lipo if running on macOS
+            if shutil.which("lipo"):
+                print(f"Combining {tool} into Universal 2 binary with lipo...")
+                subprocess.run(["lipo", "-create", "-output", out_file, arm64_file, x64_file], check=True)
+                os.chmod(out_file, 0o755)
+                # Cleanup temp single-arch files
+                if os.path.isfile(arm64_file): os.remove(arm64_file)
+                if os.path.isfile(x64_file): os.remove(x64_file)
+            else:
+                # Fallback to local architecture
+                arch = platform.machine().lower()
+                chosen = arm64_file if "arm" in arch or "aarch" in arch else x64_file
+                shutil.move(chosen, out_file)
+                os.chmod(out_file, 0o755)
+
+        return ffmpeg_final, ffprobe_final
     except Exception as e:
-        print(f"Automatic FFmpeg download notice: {e}")
-        print("Please ensure 'brew install ffmpeg' or place 'ffmpeg' binary in current folder.")
-        return None
+        print(f"Notice during static FFmpeg download: {e}")
+        # Fallback to system / homebrew ffmpeg
+        sys_ffmpeg = shutil.which("ffmpeg")
+        return sys_ffmpeg, shutil.which("ffprobe")
 
 def build():
     if sys.platform != "darwin":
@@ -58,22 +71,13 @@ def build():
     from create_icon import create_app_icon
     create_app_icon(".")
 
-    print("=== [2/4] Locating macOS FFmpeg ===")
-    from engine import find_ffmpeg_path
-    ffmpeg_bin = find_ffmpeg_path()
-    ffprobe_bin = None
+    print("=== [2/4] Preparing Embedded macOS FFmpeg & FFprobe ===")
+    ffmpeg_bin, ffprobe_bin = download_mac_binaries(".")
 
-    if not ffmpeg_bin and sys.platform == "darwin":
-        ffmpeg_bin = download_mac_ffmpeg(".")
-
-    if ffmpeg_bin:
-        print(f"Using FFmpeg at: {ffmpeg_bin}")
-        probe_candidate = os.path.join(os.path.dirname(ffmpeg_bin), "ffprobe")
-        if os.path.isfile(probe_candidate):
-            ffprobe_bin = probe_candidate
-            print(f"Using FFprobe at: {ffprobe_bin}")
-    else:
-        print("Warning: FFmpeg not detected. Download will work with YouTube formats <= 720p.")
+    if ffmpeg_bin and os.path.isfile(ffmpeg_bin):
+        print(f"Embedded FFmpeg binary: {ffmpeg_bin} ({os.path.getsize(ffmpeg_bin):,} bytes)")
+    if ffprobe_bin and os.path.isfile(ffprobe_bin):
+        print(f"Embedded FFprobe binary: {ffprobe_bin} ({os.path.getsize(ffprobe_bin):,} bytes)")
 
     print("=== [3/4] Running PyInstaller for macOS ===")
     pyinstaller_cmd = [
@@ -90,7 +94,7 @@ def build():
         "--add-data", "app_icon.png:.",
     ]
 
-    # Add ffmpeg binary if present
+    # Embed standalone static FFmpeg binaries directly inside the .app bundle
     if ffmpeg_bin and os.path.isfile(ffmpeg_bin):
         pyinstaller_cmd.extend(["--add-binary", f"{ffmpeg_bin}:."])
     if ffprobe_bin and os.path.isfile(ffprobe_bin):
@@ -106,10 +110,18 @@ def build():
 
     app_path = os.path.abspath(os.path.join("dist", "MediaGrabPro.app"))
 
-    # Remove macOS quarantine flags if running on Mac
+    # Remove macOS quarantine flags & package into single-file DMG
     if sys.platform == "darwin" and os.path.isdir(app_path):
-        print("=== [4/4] Removing Gatekeeper Quarantine & Creating DMG ===")
+        print("=== [4/4] Removing Gatekeeper Quarantine & Packaging into DMG ===")
         subprocess.run(["xattr", "-cr", app_path])
+
+        # Also copy ffmpeg directly inside Contents/MacOS just in case
+        macos_dir = os.path.join(app_path, "Contents", "MacOS")
+        if os.path.isdir(macos_dir) and ffmpeg_bin and os.path.isfile(ffmpeg_bin):
+            dest_ff = os.path.join(macos_dir, "ffmpeg")
+            if not os.path.isfile(dest_ff):
+                shutil.copy2(ffmpeg_bin, dest_ff)
+                os.chmod(dest_ff, 0o755)
 
         dmg_path = os.path.abspath(os.path.join("dist", "MediaGrabPro-macOS.dmg"))
         if os.path.isfile(dmg_path):
@@ -127,7 +139,9 @@ def build():
             ]
             print("Creating DMG disk image:", " ".join(hdiutil_cmd))
             subprocess.run(hdiutil_cmd, check=True)
-            print(f"\nCreated Single-file macOS DMG: {dmg_path}")
+            print(f"\nCreated Single-file macOS DMG (with embedded FFmpeg): {dmg_path}")
+            if os.path.isfile(dmg_path):
+                print(f"DMG Size: {os.path.getsize(dmg_path) / (1024*1024):.2f} MB")
         except Exception as e:
             print(f"DMG creation note: {e}")
 
